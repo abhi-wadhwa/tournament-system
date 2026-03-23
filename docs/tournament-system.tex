@@ -1,0 +1,139 @@
+\documentclass[11pt]{article}
+\usepackage{amsmath, amssymb, amsthm}
+\usepackage[margin=1in]{geometry}
+\usepackage{hyperref}
+
+\newtheorem{theorem}{Theorem}
+\newtheorem{lemma}[theorem]{Lemma}
+\newtheorem{remark}{Remark}
+
+\title{Tournament Formats and Pairing Algorithms:\\From Swiss Systems to Parliamentary Tabulation}
+\author{Abhi Wadhwa}
+\date{}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+These are my notes on the algorithmic underpinnings of the various tournament formats I implemented. I cover Swiss pairing with backtracking, round robin scheduling via the circle method, seeded elimination brackets, double elimination, and British Parliamentary tabulation following WUDC rules. The main mathematical content involves combinatorial scheduling, constraint satisfaction, and some analysis of how many rounds are sufficient to separate competitors. Nothing here is novel --- these are well-known tournament systems --- but I found it useful to write down the reasoning clearly, especially the tricky bits around Swiss pairing constraints and BP break calculations.
+\end{abstract}
+
+\section{Swiss Pairing: The Core Idea}
+
+Swiss-system tournaments come up all the time in chess, debate, and basically anywhere you have too many teams for a full round robin but you still want the best teams to emerge on top. The key idea is \textbf{power pairing}: after each round, you sort everyone by cumulative score and pair the top team against the second, the third against the fourth, and so on. This way, strong teams quickly start facing each other, and after enough rounds you get a reliable ranking without needing $N - 1$ rounds.
+
+So how many rounds do you actually need? Here's the intuition I like: after $R$ rounds, teams can have at most $R$ different point totals (0 through $R$). If we want to guarantee that no two undefeated teams remain, we need enough rounds so that repeated power pairing forces them to meet. With $N$ teams, the top $2^R$ teams can be ``separated'' --- meaning we can distinguish a clear ranking among them --- after $R$ rounds. So \textbf{$\lceil \log_2 N \rceil$ rounds usually suffices} for a clean break. For 16 teams, that's 4 rounds. For 64, it's 6. In practice you often run one or two extra rounds for robustness, but the logarithmic scaling is what makes Swiss systems so efficient.
+
+More formally, consider the set of teams after $R$ rounds with scores $(s_1, s_2, \ldots, s_N)$ sorted in decreasing order. Under strict power pairing with no upsets, after round $R$, the top $2^R$ teams have all played each other transitively. The maximum number of teams that can share the maximum score of $R$ points is 1 (since two teams with $R$ wins would have had to face each other at some point, and one would have lost).
+
+\section{The Backtracking Pairing Algorithm}
+
+The naive approach to Swiss pairing --- just go down the sorted list and pair adjacent teams --- breaks almost immediately because of constraints. You need to avoid rematches (two teams shouldn't play each other twice in the same tournament), and in debate formats, you want to balance sides (each team should have roughly equal numbers of proposition and opposition rounds).
+
+The solution is a backtracking algorithm, which I spent a while trying to figure out the right way to implement efficiently. Here's how it works:
+
+\begin{enumerate}
+    \item Sort all teams by cumulative points (descending), with total speaker score as tiebreaker.
+    \item Starting from the top, attempt to pair team $i$ with the next available team $j > i$.
+    \item Check constraints: has this pair already played? Would this create an imbalanced side allocation?
+    \item If the constraints are satisfied, tentatively pair $(i, j)$ and recurse to pair the remaining teams.
+    \item If the recursive call fails (no valid complete pairing exists), backtrack: unpair $(i, j)$, try the next candidate $j' > j$, and repeat.
+\end{enumerate}
+
+The \textbf{trick here} is the backtracking depth. In the worst case, this is exponential, but in practice with reasonable tournament sizes (say, $N \leq 128$), the algorithm terminates quickly because early pairings tend to work. I cap the backtracking depth at a configurable limit to avoid pathological cases.
+
+For side balancing, each team tracks a ``side history'' vector counting how many times they've been on each side. When assigning sides for a new pairing $(A, B)$, I assign $A$ to the side they've been on fewer times. If both have equal histories, it's arbitrary (or random).
+
+\section{Round Robin: The Circle Method}
+
+Round robin is conceptually simple --- every team plays every other team exactly once --- but generating the schedule efficiently requires a nice combinatorial trick called the \textbf{circle method} (sometimes called polygon scheduling).
+
+For $n$ teams (assume $n$ is even for now), fix team 1 in place and arrange the remaining $n - 1$ teams around a circle. In each round, pair team 1 with the team ``across'' from it, and pair up the remaining teams by matching positions symmetrically. Then rotate all the non-fixed teams by one position.
+
+Concretely, label the teams $0, 1, 2, \ldots, n-1$. Fix team $0$. In round $r$ (for $r = 0, 1, \ldots, n-2$), define the position of team $i$ (for $i \geq 1$) as:
+\[
+    \text{pos}(i, r) = ((i - 1 + r) \bmod (n - 1)) + 1
+\]
+Team $0$ always stays at position $0$. Then pair position $k$ with position $n - 1 - k$ for $k = 0, 1, \ldots, n/2 - 1$.
+
+This gives us exactly $n - 1$ rounds, each with $n/2$ matches, and it's easy to verify that every pair appears exactly once across all rounds. The total number of matches is $\binom{n}{2} = n(n-1)/2$, which is also $(n-1) \times (n/2)$. It checks out.
+
+For odd $n$, we add a dummy ``BYE'' team to make $n + 1$ teams, run the circle method for $n$ rounds (since $n + 1$ is now even, we get $(n+1) - 1 = n$ rounds), and any team paired with the BYE gets a rest that round. So: \textbf{$n - 1$ rounds for even $n$, $n$ rounds for odd $n$}.
+
+\section{Single Elimination: Seeded Brackets}
+
+Single elimination is the most straightforward format: lose once and you're out. The interesting part is the \textbf{seeding}, which determines who plays whom in the first round.
+
+The standard seeding rule ensures the top seeds are placed on opposite sides of the bracket. In a bracket of size $B$ (where $B$ is the smallest power of 2 $\geq N$), seed $k$ is placed to face seed $B + 1 - k$ in the first round. So in a 16-team bracket:
+\begin{align*}
+    \text{Seed 1} &\text{ vs Seed 16} \\
+    \text{Seed 8} &\text{ vs Seed 9} \\
+    \text{Seed 5} &\text{ vs Seed 12} \\
+    \text{Seed 4} &\text{ vs Seed 13} \\
+    &\vdots
+\end{align*}
+
+Notice that seed 1 and seed 2 are on opposite halves. Seed 1, seed 4, seed 5, and seed 8 are in the top half; seed 2, seed 3, seed 6, and seed 7 are in the bottom half. The pattern is recursive: within each half, the same separation principle applies.
+
+When $N$ is not a power of 2, the top $B - N$ seeds receive first-round byes (they automatically advance to the second round). This rewards higher seeds and ensures the bracket fills out to a power of 2 for subsequent rounds.
+
+\section{Double Elimination}
+
+Double elimination gives every team a second chance. There are two brackets: a winners bracket and a losers bracket. When you lose in the winners bracket, you drop to the losers bracket. You're only truly eliminated after two losses.
+
+The losers bracket structure is more complex. After each winners bracket round, the losers drop down and are integrated into the losers bracket schedule. The losers bracket champion eventually faces the winners bracket champion in a grand final. If the winners bracket champion loses the grand final, a second ``true final'' is sometimes played (since the losers bracket champion only has one loss at that point).
+
+The total number of matches in a double elimination tournament with $N$ teams is:
+\[
+    \text{matches} = 2(N - 1) \text{ or } 2(N - 1) + 1
+\]
+depending on whether a reset grand final is needed. The $2(N - 1)$ comes from the fact that each team except the champion needs to lose twice, plus the champion loses zero or one times.
+
+\section{British Parliamentary Tabulation}
+
+BP is the format used at the World Universities Debating Championship (WUDC), and the tabulation math is genuinely more involved than the other formats. Four teams compete in each room, assigned to four positions:
+
+\begin{itemize}
+    \item Opening Government (OG)
+    \item Opening Opposition (OO)
+    \item Closing Government (CG)
+    \item Closing Opposition (CO)
+\end{itemize}
+
+After each debate, the four teams are ranked 1st through 4th within their room. The point assignment is simple: 1st place gets 3 points, 2nd gets 2, 3rd gets 1, 4th gets 0. Individual speakers receive scores (typically in the range 50--100).
+
+The \textbf{standing} after $R$ rounds is determined by:
+\begin{enumerate}
+    \item Total team points (sum of rank points across all rounds), descending.
+    \item Total speaker score (sum of individual speaker scores), as the primary tiebreaker.
+\end{enumerate}
+
+Power pairing in BP works by \textbf{bracketing}: after each round, teams are sorted by total points and grouped into brackets of 4. Within each bracket, the four teams are shuffled into a room. The constraint is that teams with the most similar records should be in the same room.
+
+\subsection{Break Calculation and Institutional Caps}
+
+The ``break'' is the set of teams that advance to elimination rounds. A typical WUDC-style break takes the top $N$ teams by standing, but with an \textbf{institutional cap}: no more than $C$ teams from the same institution can break. If an institution has more than $C$ teams above the break line, only the top $C$ advance, and teams below the line are promoted to fill the spots. The algorithm is:
+
+\begin{enumerate}
+    \item Sort all teams by standing (points, then speaker score).
+    \item Walk down the list. For each team, check if their institution already has $C$ teams in the break.
+    \item If yes, skip this team and continue to the next.
+    \item If no, add them to the break.
+    \item Stop when the break is full.
+\end{enumerate}
+
+This is a greedy algorithm and it's clearly optimal in the sense that it maximizes the sum of points among breaking teams subject to the cap constraint. I convinced myself of this by noting that any swap of a breaking team for a non-breaking team with fewer points would strictly decrease total quality, and the cap constraint is maintained greedily.
+
+\section{Concluding Remarks}
+
+The common thread across all these formats is that tournament design is fundamentally about \textbf{efficient information extraction under constraints}. Swiss pairing extracts a ranking in logarithmically many rounds. Round robin is complete but expensive. Elimination is ruthlessly efficient but offers no second chances (unless you double it). BP is designed for four-way competition with a rich scoring system.
+
+The implementation challenges are mostly in the constraint satisfaction for Swiss pairing (the backtracking) and in the careful bookkeeping for BP tabulation (institutional caps, speaker score tracking, position balancing). The math is not deep, but getting the details right requires care.
+
+\begin{thebibliography}{9}
+\bibitem{fide} FIDE, ``FIDE Swiss-System Rules,'' \url{https://handbook.fide.com/}.
+\bibitem{wudc} World Universities Debating Championship, ``WUDC Tabulation Manual,'' various editions.
+\bibitem{knuth} Knuth, D.E., \textit{The Art of Computer Programming}, Vol. 4A: Combinatorial Algorithms.
+\end{thebibliography}
+
+\end{document}
